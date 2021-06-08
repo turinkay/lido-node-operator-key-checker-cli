@@ -1,15 +1,9 @@
 import json
 
 import click
-from lido import (
-    get_operators_data,
-    get_operators_keys,
-    validate_keys_multi,
-    validate_key_list_multi,
-    find_duplicates,
-    spot_duplicates,
-)
-
+from lido import Lido
+from web3 import Web3
+from web3.providers.auto import load_provider_from_uri
 
 @click.group()
 @click.option(
@@ -42,30 +36,42 @@ from lido import (
     required=False,
     help="ABI file path for operators contract.",
 )
+@click.option(
+    "--web3_provider_uri",
+    type=str,
+    required=True,
+    help="Web3 provider uri.",
+)
 @click.pass_context
-def cli(ctx, max_multicall, lido_address, lido_abi_path, registry_address, registry_abi_path):
+def cli(ctx, max_multicall, lido_address, lido_abi_path, registry_address, registry_abi_path, web3_provider_uri):
     """CLI utility to load Node Operators keys from file or network and check for duplicates and invalid signatures."""
 
-    operators_data = get_operators_data(
-        registry_address=registry_address, registry_abi_path=registry_abi_path
-    )
+    w3 = Web3(load_provider_from_uri(web3_provider_uri))
+    if w3.eth.chainId == 5:
+        from web3.middleware import geth_poa_middleware
+        w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+
+    lido = Lido(
+        w3,
+        lido_address=lido_address,
+        max_multicall=max_multicall,
+        lido_abi_path=lido_abi_path,
+        registry_address=registry_address,
+        registry_abi_path=registry_abi_path)
+
+    operators_data = lido.get_operators_data()
     click.secho("Loaded operators", fg="green")
 
-    data_with_keys = get_operators_keys(
-        operators=operators_data,
-        max_multicall=max_multicall,
-        registry_address=registry_address,
-        registry_abi_path=registry_abi_path,
-    )
+    data_with_keys = lido.get_operators_keys(operators_data)
     click.secho("Loaded operator keys", fg="green")
 
     click.secho("-")
 
     # Passing computed items as context to command functions
     ctx.ensure_object(dict)
+
+    ctx.obj["lido"] = lido
     ctx.obj["operators"] = data_with_keys
-    ctx.obj["lido_address"] = lido_address
-    ctx.obj["lido_abi_path"] = lido_abi_path
 
 
 @cli.command("validate_network_keys")
@@ -74,18 +80,13 @@ def validate_network_keys(ctx):
     """Checking node operator keys from network."""
 
     # Loading variables from context
+    lido = ctx.obj["lido"]
     operators = ctx.obj["operators"]
-    lido_address = ctx.obj["lido_address"]
-    lido_abi_path = ctx.obj["lido_abi_path"]
 
-    data_validated_keys = validate_keys_multi(
-        operators=operators,
-        lido_address=lido_address,
-        lido_abi_path=lido_abi_path,
-    )
+    data_validated_keys = lido.validate_keys_multi(operators)
     click.secho("Done signature validation", fg="green")
 
-    data_found_duplicates = find_duplicates(operators=data_validated_keys)
+    data_found_duplicates = Lido.find_duplicates(data_validated_keys)
     click.secho("Done duplicate checks", fg="green")
 
     click.secho("-")
@@ -167,6 +168,7 @@ def validate_file_keys(ctx, file):
     """Checking node operator keys from input file."""
 
     # Loading variables from context
+    lido = ctx.obj["lido"]
     operators = ctx.obj["operators"]
 
     # Load and format JSON file
@@ -183,7 +185,7 @@ def validate_file_keys(ctx, file):
 
     # Handling invalid signatures
     click.secho("Searching for invalid signatures")
-    invalid_signatures = validate_key_list_multi(input)
+    invalid_signatures = lido.validate_key_list_multi(input)
 
     if not invalid_signatures:
         click.secho("No invalid signatures found", fg="green")
@@ -198,7 +200,7 @@ def validate_file_keys(ctx, file):
     with_duplicates = []
     with click.progressbar(input, label="Searching for duplicates", show_eta=False) as keys:
         for key in keys:
-            duplicates_found = spot_duplicates(operators, key)
+            duplicates_found = Lido.spot_duplicates(operators, key)
 
             if duplicates_found:
                 with_duplicates.append({"key": key["key"], "duplicates": duplicates_found})
